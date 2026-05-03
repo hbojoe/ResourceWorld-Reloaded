@@ -1,0 +1,20 @@
+worldName: "Resources"    # Default world name set to "Resources"
+resetWarningTime: 5       # Time (in minutes) to warn players before reset
+restartTime: 3            # Hour of day when reset happens (24-hour format)
+
+multiverse:
+  # When enabled and Multiverse-Core is installed, the resource world is registered/imported with Multiverse.
+  # Bukkit gamerules are still applied directly so keep_inventory works even without Multiverse.
+  enabled: true
+
+# Reset type: "daily", "weekly", or "monthly"
+resetType: "daily"
+# For weekly: day of week (1=Monday through 7=Sunday)
+# For monthly: day of month (1-31)
+resetDay: 1
+
+# Gamerules applied whenever the resource world is created/recreated.
+# Names are flexible: keepInventory, keep_inventory, KEEP_INVENTORY all work.
+# Supported value types on 1.21.11 are boolean and integer.
+worldGameRules:
+  keep_inventory: true

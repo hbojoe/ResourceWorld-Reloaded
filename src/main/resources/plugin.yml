@@ -1,0 +1,23 @@
+name: ResourcesWorldResetter
+version: '3.0.2'
+main: hboj.ResourceWorldResetter.ResourceWorldResetter
+api-version: '1.21'
+softdepend: [Multiverse-Core]
+author: hboj
+description: A plugin to reset the resources world at regular intervals.
+
+commands:
+  rwrgui:
+    description: "Open the Resource World Reset GUI"
+    usage: "/rwrgui"
+    permission: "resourceworldresetter.admin"
+
+  reloadrwr:
+    description: "Reload the ResourceWorldResetter plugin"
+    usage: "/reloadrwr"
+    permission: "resourceworldresetter.admin"
+
+  resetworld:
+    description: "Force reset the resource world"
+    usage: "/resetworld"
+    permission: "resourceworldresetter.admin"
