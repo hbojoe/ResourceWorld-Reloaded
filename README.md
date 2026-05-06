@@ -1,7 +1,6 @@
 # ResourceWorldResetter v3.0.2
-<p align="center">
-  <img src="https://files.catbox.moe/xhfveh.png" alt="project-image">
-</p>
+
+
 ## Overview
 ResourceWorldResetter automates the resetting of resource worlds on your Minecraft server. It integrates with **Multiverse-Core** to manage world regeneration without requiring restarts and provides an intuitive GUI for configuration.
 
@@ -60,6 +59,5 @@ For full documentation, including **detailed config settings, GUI breakdown, and
 
 **Author**: hboj  
 GitHub: [hboj](https://github.com/hboj)  
-Discord: [LozDev Mines](https://discord.gg/Y3UuG7xu9x)  
 
 This project is licensed under the [MIT License](LICENSE).
