@@ -48,6 +48,7 @@ resourceWorlds:
   end:
     enabled: true
     name: "Resources_the_end"
+    disableDragonSpawn: false
     gameRules:
       keep_inventory: true
 ```

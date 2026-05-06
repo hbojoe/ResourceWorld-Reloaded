@@ -15,7 +15,12 @@ import org.bukkit.WorldType;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.EnderDragon;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntitySpawnEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -35,7 +40,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.logging.Level;
 
-public class ResourceWorldResetter extends JavaPlugin {
+public class ResourceWorldResetter extends JavaPlugin implements Listener {
     private static final String OVERWORLD_RESOURCE_KEY = "overworld";
 
     private String worldName;
@@ -177,6 +182,7 @@ public class ResourceWorldResetter extends JavaPlugin {
 
         adminGUI = new AdminGUI(this);
         getServer().getPluginManager().registerEvents(new AdminGUIListener(this, adminGUI), this);
+        getServer().getPluginManager().registerEvents(this, this);
 
         ensureResourceWorldsExist();
         scheduleNextReset();
@@ -471,6 +477,17 @@ public class ResourceWorldResetter extends JavaPlugin {
         }
     }
 
+    @EventHandler
+    public void onEntitySpawn(EntitySpawnEvent event) {
+        if (!(event.getEntity() instanceof EnderDragon)) {
+            return;
+        }
+
+        if (shouldDisableDragonSpawn(event.getLocation().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
     public void recreateWorld() {
         ResourceWorldSettings settings = resourceWorlds.get(OVERWORLD_RESOURCE_KEY);
         if (settings != null) {
@@ -493,6 +510,7 @@ public class ResourceWorldResetter extends JavaPlugin {
 
         if (success) {
             applyConfiguredGameRulesWithRetry(settings, recreatedWorld);
+            removeEnderDragonsIfDisabled(settings, recreatedWorld);
             ensureMultiverseWorldRegisteredWithRetry(settings, recreatedWorld);
             Bukkit.broadcastMessage(ChatColor.GREEN + "[ResourceWorldResetter] " +
                     "The resource world '" + settings.name + "' has been reset and is ready to use!");
@@ -534,6 +552,7 @@ public class ResourceWorldResetter extends JavaPlugin {
             }
             if (success) {
                 applyConfiguredGameRulesWithRetry(settings, createdWorld);
+                removeEnderDragonsIfDisabled(settings, createdWorld);
                 ensureMultiverseWorldRegisteredWithRetry(settings, createdWorld);
             }
             LogUtil.log(getLogger(), "Created resource world: " + settings.name + ", Success: " + success, Level.INFO);
@@ -541,6 +560,7 @@ public class ResourceWorldResetter extends JavaPlugin {
             LogUtil.log(getLogger(), "Resource world exists: " + settings.name, Level.INFO);
             World world = Bukkit.getWorld(settings.name);
             applyConfiguredGameRulesWithRetry(settings, world);
+            removeEnderDragonsIfDisabled(settings, world);
             ensureMultiverseWorldRegisteredWithRetry(settings, world);
         }
     }
@@ -622,11 +642,13 @@ public class ResourceWorldResetter extends JavaPlugin {
         String basePath = "resourceWorlds." + key;
         boolean enabled = getConfig().getBoolean(basePath + ".enabled", defaultEnabled);
         String name = getConfig().getString(basePath + ".name", defaultName);
+        boolean disableDragonSpawn = World.Environment.THE_END.equals(environment)
+                && getConfig().getBoolean(basePath + ".disableDragonSpawn", false);
         Map<String, Object> gameRules = loadGameRules(basePath + ".gameRules");
         if (gameRules.isEmpty()) {
             gameRules.putAll(fallbackGameRules);
         }
-        return new ResourceWorldSettings(key, displayName, enabled, name, environment, WorldType.NORMAL, gameRules);
+        return new ResourceWorldSettings(key, displayName, enabled, name, environment, WorldType.NORMAL, gameRules, disableDragonSpawn);
     }
 
     private Map<String, Object> loadGameRules(String path) {
@@ -650,6 +672,35 @@ public class ResourceWorldResetter extends JavaPlugin {
             }
         }
         return enabledWorlds;
+    }
+
+    private boolean shouldDisableDragonSpawn(World world) {
+        if (world == null) {
+            return false;
+        }
+
+        for (ResourceWorldSettings settings : resourceWorlds.values()) {
+            if (settings.shouldDisableDragonSpawnIn(world)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void removeEnderDragonsIfDisabled(ResourceWorldSettings settings, World world) {
+        if (world == null || !settings.shouldDisableDragonSpawnIn(world)) {
+            return;
+        }
+
+        int removed = 0;
+        for (EnderDragon dragon : world.getEntitiesByClass(EnderDragon.class)) {
+            dragon.remove();
+            removed++;
+        }
+
+        if (removed > 0) {
+            LogUtil.log(getLogger(), "Removed " + removed + " Ender Dragon(s) from resource world '" + world.getName() + "'.", Level.INFO);
+        }
     }
 
     private String normalizeResetType(String type) {
@@ -721,7 +772,7 @@ public class ResourceWorldResetter extends JavaPlugin {
 
         mvWorldManager = resolveWorldManager(multiversePlugin);
         if (mvWorldManager == null) {
-            LogUtil.log(getLogger(), "Multiverse-Core found, but its legacy world manager API is unavailable. Command import fallback remains enabled.", Level.WARNING);
+            LogUtil.log(getLogger(), "Multiverse-Core found, but its legacy world manager API is unavailable. Using worlds.yml and command import fallback.", Level.WARNING);
             return;
         }
 
@@ -817,6 +868,10 @@ public class ResourceWorldResetter extends JavaPlugin {
     }
 
     private boolean isMultiverseWorldRegistered(String targetWorldName) {
+        if (isWorldListedInMultiverseConfig(targetWorldName)) {
+            return true;
+        }
+
         if (mvWorldManager == null) {
             return false;
         }
@@ -830,6 +885,29 @@ public class ResourceWorldResetter extends JavaPlugin {
         }
 
         return getMultiverseWorld(targetWorldName) != null;
+    }
+
+    private boolean isWorldListedInMultiverseConfig(String targetWorldName) {
+        if (multiversePlugin == null || targetWorldName == null || targetWorldName.isBlank()) {
+            return false;
+        }
+
+        File worldsFile = new File(multiversePlugin.getDataFolder(), "worlds.yml");
+        if (!worldsFile.isFile()) {
+            return false;
+        }
+
+        ConfigurationSection worldsSection = YamlConfiguration.loadConfiguration(worldsFile).getConfigurationSection("worlds");
+        if (worldsSection == null) {
+            return false;
+        }
+
+        for (String worldNameKey : worldsSection.getKeys(false)) {
+            if (worldNameKey.equalsIgnoreCase(targetWorldName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Object getMultiverseWorld(String targetWorldName) {
@@ -849,13 +927,17 @@ public class ResourceWorldResetter extends JavaPlugin {
         }
 
         String targetWorldName = settings.name;
+        if (isMultiverseWorldRegistered(targetWorldName)) {
+            return true;
+        }
+
         if (!targetWorldName.matches("[A-Za-z0-9_./-]+")) {
             LogUtil.log(getLogger(), "Skipping Multiverse command import for world name with unsupported command characters: " + targetWorldName, Level.WARNING);
             return false;
         }
 
-        boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mv import " + targetWorldName + " " + getMultiverseEnvironmentName(settings));
-        return dispatched && (mvWorldManager == null || isMultiverseWorldRegistered(targetWorldName));
+        boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mv import " + targetWorldName + " " + getMultiverseCommandEnvironmentName(settings));
+        return dispatched && isMultiverseWorldRegistered(targetWorldName);
     }
 
     private void applyMultiverseKeepInventoryIfConfigured(ResourceWorldSettings settings, World world) {
@@ -1089,6 +1171,13 @@ public class ResourceWorldResetter extends JavaPlugin {
         return settings.environment.name();
     }
 
+    private String getMultiverseCommandEnvironmentName(ResourceWorldSettings settings) {
+        if (settings.environment == World.Environment.THE_END) {
+            return "THE_END";
+        }
+        return settings.environment.name();
+    }
+
     private boolean isMultiverseUsable() {
         return multiverseEnabled && multiversePlugin != null && multiversePlugin.isEnabled();
     }
@@ -1213,10 +1302,11 @@ public class ResourceWorldResetter extends JavaPlugin {
         private final World.Environment environment;
         private final WorldType worldType;
         private final Map<String, Object> gameRules;
+        private final boolean disableDragonSpawn;
 
         private ResourceWorldSettings(String key, String displayName, boolean enabled, String name,
                                       World.Environment environment, WorldType worldType,
-                                      Map<String, Object> gameRules) {
+                                      Map<String, Object> gameRules, boolean disableDragonSpawn) {
             this.key = key;
             this.displayName = displayName;
             this.enabled = enabled;
@@ -1224,6 +1314,15 @@ public class ResourceWorldResetter extends JavaPlugin {
             this.environment = environment;
             this.worldType = worldType;
             this.gameRules = gameRules;
+            this.disableDragonSpawn = disableDragonSpawn;
+        }
+
+        private boolean shouldDisableDragonSpawnIn(World world) {
+            return enabled
+                    && disableDragonSpawn
+                    && environment == World.Environment.THE_END
+                    && world != null
+                    && name.equals(world.getName());
         }
     }
 

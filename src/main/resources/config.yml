@@ -37,6 +37,8 @@ resourceWorlds:
   end:
     enabled: true
     name: "Resources_the_end"
+    # Set true to prevent Ender Dragons from spawning in this End resource world.
+    disableDragonSpawn: false
     gameRules:
       keep_inventory: true
 
