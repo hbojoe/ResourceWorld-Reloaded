@@ -18,6 +18,6 @@ commands:
     permission: "resourceworldresetter.admin"
 
   resetworld:
-    description: "Force reset the resource world"
+    description: "Force reset all enabled resource worlds"
     usage: "/resetworld"
     permission: "resourceworldresetter.admin"

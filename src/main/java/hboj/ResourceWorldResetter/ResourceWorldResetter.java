@@ -23,9 +23,12 @@ import java.io.File;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -33,6 +36,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.logging.Level;
 
 public class ResourceWorldResetter extends JavaPlugin {
+    private static final String OVERWORLD_RESOURCE_KEY = "overworld";
+
     private String worldName;
     private boolean multiverseEnabled;
     private Plugin multiversePlugin;
@@ -41,8 +46,10 @@ public class ResourceWorldResetter extends JavaPlugin {
     private int resetWarningTime;
     private String resetType;
     private int resetDay;
+    private int resetIntervalDays;
+    private LocalDateTime nextIntervalReset;
     private AdminGUI adminGUI;
-    private final Map<String, Object> configuredGameRules = new LinkedHashMap<>();
+    private final Map<String, ResourceWorldSettings> resourceWorlds = new LinkedHashMap<>();
     private int warningTaskId = -1;
     private int resetTaskId = -1;
 
@@ -51,35 +58,86 @@ public class ResourceWorldResetter extends JavaPlugin {
     public int getRestartTime() { return this.restartTime; }
     public int getResetWarningTime() { return this.resetWarningTime; }
     public int getResetDay() { return this.resetDay; }
+    public int getResetIntervalDays() { return this.resetIntervalDays; }
     public boolean isMultiverseEnabled() { return this.multiverseEnabled; }
+
+    public String getEnabledResourceWorldSummary() {
+        List<String> enabledWorldNames = new ArrayList<>();
+        for (ResourceWorldSettings settings : getEnabledResourceWorlds()) {
+            enabledWorldNames.add(settings.name);
+        }
+
+        if (enabledWorldNames.isEmpty()) {
+            return "None enabled";
+        }
+        return String.join(", ", enabledWorldNames);
+    }
+
+    public String getResetScheduleDescription() {
+        if ("interval".equals(resetType)) {
+            return "Every " + resetIntervalDays + " " + (resetIntervalDays == 1 ? "Day" : "Days");
+        }
+        return capitalizeFirstLetter(resetType);
+    }
 
     public void setWorldName(String name) {
         this.worldName = name;
+        ResourceWorldSettings settings = resourceWorlds.get(OVERWORLD_RESOURCE_KEY);
+        if (settings != null) {
+            settings.name = name;
+        }
         getConfig().set("worldName", name);
+        getConfig().set("resourceWorlds." + OVERWORLD_RESOURCE_KEY + ".name", name);
         saveConfig();
         ensureResourceWorldExists();
     }
 
     public void setResetType(String type) {
-        this.resetType = type;
-        getConfig().set("resetType", type);
+        Integer intervalDaysFromType = parseIntervalDaysFromResetType(type);
+        this.resetType = normalizeResetType(type);
+        getConfig().set("resetType", this.resetType);
+        if (intervalDaysFromType != null) {
+            this.resetIntervalDays = intervalDaysFromType;
+            getConfig().set("resetIntervalDays", this.resetIntervalDays);
+        }
+        if (!"interval".equals(this.resetType) || intervalDaysFromType != null) {
+            clearNextIntervalReset();
+        }
         saveConfig();
-        scheduleDailyReset();
+        scheduleNextReset();
     }
 
     public void setResetDay(int day) {
         this.resetDay = day;
         getConfig().set("resetDay", day);
         saveConfig();
-        scheduleDailyReset();
+        scheduleNextReset();
+    }
+
+    public void setIntervalResetDays(int days) {
+        if (days < 1) {
+            return;
+        }
+
+        this.resetType = "interval";
+        this.resetIntervalDays = days;
+        clearNextIntervalReset();
+        getConfig().set("resetType", this.resetType);
+        getConfig().set("resetIntervalDays", days);
+        saveConfig();
+        scheduleNextReset();
     }
 
     public void setRestartTime(int hour) {
         if (hour >= 0 && hour <= 23) {
             this.restartTime = hour;
             getConfig().set("restartTime", hour);
+            if ("interval".equals(resetType) && nextIntervalReset != null) {
+                nextIntervalReset = nextIntervalReset.withHour(restartTime).withMinute(0).withSecond(0).withNano(0);
+                getConfig().set("nextIntervalReset", nextIntervalReset.toString());
+            }
             saveConfig();
-            scheduleDailyReset();
+            scheduleNextReset();
 
             LogUtil.log(getLogger(), "Restart time set to " + hour + ":00", Level.INFO);
         }
@@ -90,7 +148,7 @@ public class ResourceWorldResetter extends JavaPlugin {
             this.resetWarningTime = minutes;
             getConfig().set("resetWarningTime", minutes);
             saveConfig();
-            scheduleDailyReset();
+            scheduleNextReset();
 
             LogUtil.log(getLogger(), "Reset warning time set to " + minutes + " minutes", Level.INFO);
         }
@@ -110,6 +168,7 @@ public class ResourceWorldResetter extends JavaPlugin {
             metrics.addCustomChart(new Metrics.SimplePie("reset_type", () -> this.resetType));
             metrics.addCustomChart(new Metrics.SimplePie("reset_hour", () -> String.valueOf(this.restartTime)));
             metrics.addCustomChart(new Metrics.SimplePie("warning_time", () -> String.valueOf(this.resetWarningTime)));
+            metrics.addCustomChart(new Metrics.SimplePie("reset_interval_days", () -> String.valueOf(this.resetIntervalDays)));
             metrics.addCustomChart(new Metrics.SimplePie("server_version", Bukkit::getBukkitVersion));
             LogUtil.log(getLogger(), "bStats metrics enabled", Level.INFO);
         } else {
@@ -119,10 +178,8 @@ public class ResourceWorldResetter extends JavaPlugin {
         adminGUI = new AdminGUI(this);
         getServer().getPluginManager().registerEvents(new AdminGUIListener(this, adminGUI), this);
 
-        ensureResourceWorldExists();
-        applyConfiguredGameRulesWithRetry(Bukkit.getWorld(worldName));
-        ensureMultiverseWorldRegisteredWithRetry(Bukkit.getWorld(worldName));
-        scheduleDailyReset();
+        ensureResourceWorldsExist();
+        scheduleNextReset();
         LogUtil.log(getLogger(), "ResourcesWorldResetter v" + getDescription().getVersion() + " enabled successfully!", Level.INFO);
     }
 
@@ -160,9 +217,8 @@ public class ResourceWorldResetter extends JavaPlugin {
                     reloadConfig();
                     loadConfig();
                     setupMultiverseIntegration();
-                    scheduleDailyReset();
-                    applyConfiguredGameRulesWithRetry(Bukkit.getWorld(worldName));
-                    ensureMultiverseWorldRegisteredWithRetry(Bukkit.getWorld(worldName));
+                    scheduleNextReset();
+                    ensureResourceWorldsExist();
                     sender.sendMessage(ChatColor.GREEN + "ResourcesWorldResetter configuration reloaded!");
                     return true;
 
@@ -178,37 +234,16 @@ public class ResourceWorldResetter extends JavaPlugin {
         return false;
     }
 
-    private void scheduleDailyReset() {
+    private void scheduleNextReset() {
         cancelScheduledTasks();
 
+        if (getEnabledResourceWorlds().isEmpty()) {
+            LogUtil.log(getLogger(), "No enabled resource worlds. Global reset scheduling is disabled.", Level.INFO);
+            return;
+        }
+
         LocalDateTime now = LocalDateTime.now();
-        LocalDateTime nextReset = now.withHour(restartTime).withMinute(0).withSecond(0);
-
-        if (now.compareTo(nextReset) >= 0) {
-            nextReset = nextReset.plusDays(1);
-        }
-
-        if ("weekly".equals(resetType)) {
-            int currentDay = now.getDayOfWeek().getValue();
-            int daysUntilReset = (resetDay - currentDay + 7) % 7;
-            if (daysUntilReset == 0 && now.compareTo(nextReset) >= 0) {
-                daysUntilReset = 7;
-            }
-            nextReset = nextReset.plusDays(daysUntilReset);
-            LogUtil.log(getLogger(), "Scheduled weekly reset for " + nextReset, Level.INFO);
-        } else if ("monthly".equals(resetType)) {
-            LocalDateTime nextMonth = now;
-            if (now.getDayOfMonth() > resetDay || (now.getDayOfMonth() == resetDay && now.compareTo(nextReset) >= 0)) {
-                nextMonth = now.plusMonths(1);
-            }
-
-            int maxDay = nextMonth.getMonth().length(nextMonth.toLocalDate().isLeapYear());
-            int actualResetDay = Math.min(resetDay, maxDay);
-            nextReset = nextMonth.withDayOfMonth(actualResetDay).withHour(restartTime).withMinute(0).withSecond(0);
-            LogUtil.log(getLogger(), "Scheduled monthly reset for " + nextReset, Level.INFO);
-        } else {
-            LogUtil.log(getLogger(), "Scheduled daily reset for " + nextReset, Level.INFO);
-        }
+        LocalDateTime nextReset = calculateNextReset(now);
 
         long resetDelayTicks = Math.max(1, ChronoUnit.SECONDS.between(now, nextReset) * 20);
 
@@ -223,7 +258,7 @@ public class ResourceWorldResetter extends JavaPlugin {
 
                 warningTaskId = Bukkit.getScheduler().runTaskLater(this, () -> {
                     Bukkit.broadcastMessage(ChatColor.YELLOW + "[ResourceWorldResetter] " +
-                            "Resource world will reset in " + resetWarningTime + " minutes!");
+                            "Resource worlds will reset in " + resetWarningTime + " minutes!");
                     LogUtil.log(getLogger(), "Broadcast reset warning to players", Level.INFO);
                 }, warningDelayTicks).getTaskId();
             }
@@ -238,76 +273,179 @@ public class ResourceWorldResetter extends JavaPlugin {
         }, resetDelayTicks).getTaskId();
     }
 
+    private LocalDateTime calculateNextReset(LocalDateTime now) {
+        return switch (resetType) {
+            case "interval" -> calculateNextIntervalReset(now);
+            case "weekly" -> calculateNextWeeklyReset(now);
+            case "monthly" -> calculateNextMonthlyReset(now);
+            default -> calculateNextDailyReset(now);
+        };
+    }
+
+    private LocalDateTime calculateNextDailyReset(LocalDateTime now) {
+        LocalDateTime nextReset = resetTimeOn(now);
+        if (!nextReset.isAfter(now)) {
+            nextReset = nextReset.plusDays(1);
+        }
+        LogUtil.log(getLogger(), "Scheduled daily reset for " + nextReset, Level.INFO);
+        return nextReset;
+    }
+
+    private LocalDateTime calculateNextIntervalReset(LocalDateTime now) {
+        if (nextIntervalReset == null) {
+            nextIntervalReset = resetTimeOn(now);
+        }
+
+        while (!nextIntervalReset.isAfter(now)) {
+            nextIntervalReset = nextIntervalReset.plusDays(resetIntervalDays);
+        }
+
+        getConfig().set("nextIntervalReset", nextIntervalReset.toString());
+        saveConfig();
+        LogUtil.log(getLogger(), "Scheduled every-" + resetIntervalDays + "-days reset for " + nextIntervalReset, Level.INFO);
+        return nextIntervalReset;
+    }
+
+    private LocalDateTime calculateNextWeeklyReset(LocalDateTime now) {
+        int currentDay = now.getDayOfWeek().getValue();
+        int daysUntilReset = (resetDay - currentDay + 7) % 7;
+        LocalDateTime nextReset = resetTimeOn(now).plusDays(daysUntilReset);
+
+        if (!nextReset.isAfter(now)) {
+            nextReset = nextReset.plusDays(7);
+        }
+
+        LogUtil.log(getLogger(), "Scheduled weekly reset for " + nextReset, Level.INFO);
+        return nextReset;
+    }
+
+    private LocalDateTime calculateNextMonthlyReset(LocalDateTime now) {
+        LocalDateTime nextReset = monthlyResetTimeInMonth(now);
+
+        if (!nextReset.isAfter(now)) {
+            nextReset = monthlyResetTimeInMonth(now.plusMonths(1));
+        }
+
+        LogUtil.log(getLogger(), "Scheduled monthly reset for " + nextReset, Level.INFO);
+        return nextReset;
+    }
+
+    private LocalDateTime resetTimeOn(LocalDateTime dateTime) {
+        return dateTime.withHour(restartTime).withMinute(0).withSecond(0).withNano(0);
+    }
+
+    private LocalDateTime monthlyResetTimeInMonth(LocalDateTime dateTime) {
+        int maxDay = dateTime.getMonth().length(dateTime.toLocalDate().isLeapYear());
+        int actualResetDay = Math.min(Math.max(resetDay, 1), maxDay);
+        return dateTime.withDayOfMonth(actualResetDay).withHour(restartTime).withMinute(0).withSecond(0).withNano(0);
+    }
+
     public void resetResourceWorld() {
         resetResourceWorld(false);
     }
 
     public void resetResourceWorld(boolean isScheduled) {
-        World world = Bukkit.getWorld(worldName);
-        if (world == null) {
-            LogUtil.log(getLogger(), "World '" + worldName + "' not found! Attempting to create it...", Level.WARNING);
-            ensureResourceWorldExists();
-            world = Bukkit.getWorld(worldName);
-
-            if (world == null) {
-                LogUtil.log(getLogger(), "Failed to create world '" + worldName + "'! Reset aborted.", Level.SEVERE);
-                return;
-            }
+        List<ResourceWorldSettings> enabledWorlds = getEnabledResourceWorlds();
+        if (enabledWorlds.isEmpty()) {
+            LogUtil.log(getLogger(), "No enabled resource worlds to reset.", Level.WARNING);
+            Bukkit.broadcastMessage(ChatColor.YELLOW + "[ResourceWorldResetter] No resource worlds are enabled for reset.");
+            return;
         }
 
-        if (!isScheduled || resetWarningTime <= 0) {
-            performReset(world);
+        double tpsBefore = getServerTPS();
+        long startTime = System.currentTimeMillis();
+        List<String> failedWorlds = new ArrayList<>();
+
+        LogUtil.log(getLogger(), "Starting global reset for " + enabledWorlds.size() + " resource worlds.", Level.INFO);
+        Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
+                "Resource world reset in progress. Players in enabled resource worlds will be teleported to safety.");
+
+        resetResourceWorldsSequentially(enabledWorlds, 0, startTime, tpsBefore, failedWorlds);
+    }
+
+    private void resetResourceWorldsSequentially(List<ResourceWorldSettings> worlds, int index, long startTime,
+                                                double tpsBefore, List<String> failedWorlds) {
+        if (index >= worlds.size()) {
+            finishGlobalReset(startTime, tpsBefore, failedWorlds);
+            return;
+        }
+
+        performReset(worlds.get(index), failedWorlds,
+                () -> resetResourceWorldsSequentially(worlds, index + 1, startTime, tpsBefore, failedWorlds));
+    }
+
+    private void finishGlobalReset(long startTime, double tpsBefore, List<String> failedWorlds) {
+        long duration = System.currentTimeMillis() - startTime;
+        double tpsAfter = getServerTPS();
+
+        if (failedWorlds.isEmpty()) {
+            Bukkit.broadcastMessage(ChatColor.GREEN + "[ResourceWorldResetter] " +
+                    "Resource worlds reset completed in " + (duration / 1000) + " seconds (TPS: " +
+                    String.format("%.2f", tpsBefore) + " -> " + String.format("%.2f", tpsAfter) + ").");
+            LogUtil.log(getLogger(), "Global resource world reset completed in " + duration + "ms", Level.INFO);
         } else {
-            performReset(world);
+            Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
+                    "Resource world reset completed with failures: " + String.join(", ", failedWorlds) + ".");
+            LogUtil.log(getLogger(), "Global resource world reset completed with failures: " +
+                    String.join(", ", failedWorlds), Level.WARNING);
+        }
+
+        if (resetTaskId != -1) {
+            Bukkit.getScheduler().runTaskLater(this, this::scheduleNextReset, 20);
         }
     }
 
-    private void performReset(World world) {
-        double tpsBefore = getServerTPS();
-        long startTime = System.currentTimeMillis();
+    private void performReset(ResourceWorldSettings settings, List<String> failedWorlds, Runnable afterReset) {
+        World world = Bukkit.getWorld(settings.name);
+        if (world == null) {
+            LogUtil.log(getLogger(), "World '" + settings.name + "' not found! Attempting to create it...", Level.WARNING);
+            ensureResourceWorldExists(settings);
+            world = Bukkit.getWorld(settings.name);
 
-        LogUtil.log(getLogger(), "Starting world reset process for " + worldName, Level.INFO);
-        Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
-                "Resource world reset in progress. Players in that world will be teleported to safety.");
-
-        teleportPlayersSafely(world);
-
-        if (!unloadWorld(world)) {
-            LogUtil.log(getLogger(), "Failed to unload world: " + worldName + ". Retrying with forced unload.", Level.WARNING);
-
-            if (!forceUnloadWorld(world)) {
-                LogUtil.log(getLogger(), "Forced unload also failed. Aborting reset.", Level.SEVERE);
-                Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
-                        "Failed to reset resource world. Please notify an administrator.");
+            if (world == null) {
+                LogUtil.log(getLogger(), "Failed to create world '" + settings.name + "'! Reset skipped.", Level.SEVERE);
+                failedWorlds.add(settings.name);
+                afterReset.run();
                 return;
             }
         }
 
-        CompletableFuture.runAsync(() -> {
-            File worldFolder = new File(Bukkit.getWorldContainer(), worldName);
-            LogUtil.log(getLogger(), "Deleting world folder: " + worldFolder.getAbsolutePath(), Level.INFO);
+        LogUtil.log(getLogger(), "Starting world reset process for " + settings.name, Level.INFO);
 
-            if (deleteFolder(worldFolder)) {
-                Bukkit.getScheduler().runTask(this, () -> {
-                    LogUtil.log(getLogger(), "World folder deleted, recreating world", Level.INFO);
-                    recreateWorld();
-                    long duration = System.currentTimeMillis() - startTime;
-                    double tpsAfter = getServerTPS();
-                    Bukkit.broadcastMessage(ChatColor.GREEN + "[ResourceWorldResetter] " +
-                            "Resource world reset completed in " + (duration / 1000) + " seconds (TPS: " +
-                            String.format("%.2f", tpsBefore) + " -> " + String.format("%.2f", tpsAfter) + ").");
-                    LogUtil.log(getLogger(), "Resource world reset completed in " + duration + "ms", Level.INFO);
+        teleportPlayersSafely(world);
 
-                    if (resetTaskId != -1) {
-                        Bukkit.getScheduler().runTaskLater(this, this::scheduleDailyReset, 20);
-                    }
-                });
-            } else {
-                LogUtil.log(getLogger(), "Failed to delete world folder: " + worldName, Level.SEVERE);
-                Bukkit.getScheduler().runTask(this, () -> Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
-                        "Resource world reset failed! Check server logs for details."));
+        if (!unloadWorld(settings, world)) {
+            LogUtil.log(getLogger(), "Failed to unload world: " + settings.name + ". Retrying with forced unload.", Level.WARNING);
+
+            if (!forceUnloadWorld(settings, world)) {
+                LogUtil.log(getLogger(), "Forced unload also failed. Aborting reset.", Level.SEVERE);
+                Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
+                        "Failed to reset resource world '" + settings.name + "'. Please notify an administrator.");
+                failedWorlds.add(settings.name);
+                afterReset.run();
+                return;
             }
-        });
+        }
+
+        CompletableFuture.supplyAsync(() -> {
+            File worldFolder = new File(Bukkit.getWorldContainer(), settings.name);
+            LogUtil.log(getLogger(), "Deleting world folder: " + worldFolder.getAbsolutePath(), Level.INFO);
+            return deleteFolder(worldFolder);
+        }).thenAccept(deleted -> Bukkit.getScheduler().runTask(this, () -> {
+            if (deleted) {
+                LogUtil.log(getLogger(), "World folder deleted, recreating world: " + settings.name, Level.INFO);
+                if (!recreateWorld(settings)) {
+                    failedWorlds.add(settings.name);
+                }
+            } else {
+                failedWorlds.add(settings.name);
+                LogUtil.log(getLogger(), "Failed to delete world folder: " + settings.name, Level.SEVERE);
+                Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
+                        "Resource world reset failed for '" + settings.name + "'! Check server logs for details.");
+            }
+
+            afterReset.run();
+        }));
     }
 
     public double getServerTPS() {
@@ -334,71 +472,236 @@ public class ResourceWorldResetter extends JavaPlugin {
     }
 
     public void recreateWorld() {
+        ResourceWorldSettings settings = resourceWorlds.get(OVERWORLD_RESOURCE_KEY);
+        if (settings != null) {
+            recreateWorld(settings);
+        }
+    }
+
+    private boolean recreateWorld(ResourceWorldSettings settings) {
         World recreatedWorld = null;
-        boolean success = addWorld(worldName);
+        boolean success = addWorld(settings);
         if (success) {
-            recreatedWorld = Bukkit.getWorld(worldName);
+            recreatedWorld = Bukkit.getWorld(settings.name);
         }
         if (!success) {
-            recreatedWorld = Bukkit.createWorld(new WorldCreator(worldName)
-                    .environment(World.Environment.NORMAL)
-                    .type(WorldType.NORMAL));
+            recreatedWorld = Bukkit.createWorld(new WorldCreator(settings.name)
+                    .environment(settings.environment)
+                    .type(settings.worldType));
             success = recreatedWorld != null;
         }
 
         if (success) {
-            applyConfiguredGameRulesWithRetry(recreatedWorld);
-            ensureMultiverseWorldRegisteredWithRetry(recreatedWorld);
+            applyConfiguredGameRulesWithRetry(settings, recreatedWorld);
+            ensureMultiverseWorldRegisteredWithRetry(settings, recreatedWorld);
             Bukkit.broadcastMessage(ChatColor.GREEN + "[ResourceWorldResetter] " +
-                    "The resource world has been reset and is ready to use!");
-            LogUtil.log(getLogger(), "World recreation successful", Level.INFO);
+                    "The resource world '" + settings.name + "' has been reset and is ready to use!");
+            LogUtil.log(getLogger(), "World recreation successful: " + settings.name, Level.INFO);
         } else {
             Bukkit.broadcastMessage(ChatColor.RED + "[ResourceWorldResetter] " +
-                    "Failed to recreate the resource world!");
-            LogUtil.log(getLogger(), "Failed to recreate world: " + worldName, Level.SEVERE);
+                    "Failed to recreate the resource world '" + settings.name + "'!");
+            LogUtil.log(getLogger(), "Failed to recreate world: " + settings.name, Level.SEVERE);
         }
+        return success;
     }
 
     public void ensureResourceWorldExists() {
-        if (Bukkit.getWorld(worldName) == null) {
-            LogUtil.log(getLogger(), "Resource world doesn't exist, creating: " + worldName, Level.INFO);
+        ResourceWorldSettings settings = resourceWorlds.get(OVERWORLD_RESOURCE_KEY);
+        if (settings != null) {
+            ensureResourceWorldExists(settings);
+        }
+    }
+
+    private void ensureResourceWorldsExist() {
+        for (ResourceWorldSettings settings : getEnabledResourceWorlds()) {
+            ensureResourceWorldExists(settings);
+        }
+    }
+
+    private void ensureResourceWorldExists(ResourceWorldSettings settings) {
+        if (Bukkit.getWorld(settings.name) == null) {
+            LogUtil.log(getLogger(), "Resource world doesn't exist, creating: " + settings.name, Level.INFO);
             World createdWorld = null;
-            boolean success = addWorld(worldName);
+            boolean success = addWorld(settings);
             if (success) {
-                createdWorld = Bukkit.getWorld(worldName);
+                createdWorld = Bukkit.getWorld(settings.name);
             }
             if (!success) {
-                createdWorld = Bukkit.createWorld(new WorldCreator(worldName)
-                        .environment(World.Environment.NORMAL)
-                        .type(WorldType.NORMAL));
+                createdWorld = Bukkit.createWorld(new WorldCreator(settings.name)
+                        .environment(settings.environment)
+                        .type(settings.worldType));
                 success = createdWorld != null;
             }
             if (success) {
-                applyConfiguredGameRulesWithRetry(createdWorld);
-                ensureMultiverseWorldRegisteredWithRetry(createdWorld);
+                applyConfiguredGameRulesWithRetry(settings, createdWorld);
+                ensureMultiverseWorldRegisteredWithRetry(settings, createdWorld);
             }
-            LogUtil.log(getLogger(), "Created resource world: " + worldName + ", Success: " + success, Level.INFO);
+            LogUtil.log(getLogger(), "Created resource world: " + settings.name + ", Success: " + success, Level.INFO);
         } else {
-            LogUtil.log(getLogger(), "Resource world exists: " + worldName, Level.INFO);
-            ensureMultiverseWorldRegisteredWithRetry(Bukkit.getWorld(worldName));
+            LogUtil.log(getLogger(), "Resource world exists: " + settings.name, Level.INFO);
+            World world = Bukkit.getWorld(settings.name);
+            applyConfiguredGameRulesWithRetry(settings, world);
+            ensureMultiverseWorldRegisteredWithRetry(settings, world);
         }
     }
 
     public void loadConfig() {
         reloadConfig();
-        worldName = getConfig().getString("worldName", "Resources");
         multiverseEnabled = getConfig().getBoolean("multiverse.enabled", true);
         restartTime = getConfig().getInt("restartTime", 3);
         resetWarningTime = getConfig().getInt("resetWarningTime", 5);
-        resetType = getConfig().getString("resetType", "daily");
+        resetIntervalDays = Math.max(1, getConfig().getInt("resetIntervalDays", 1));
+        String configuredResetType = getConfig().getString("resetType", "daily");
+        Integer intervalDaysFromType = parseIntervalDaysFromResetType(configuredResetType);
+        if (intervalDaysFromType != null) {
+            resetIntervalDays = intervalDaysFromType;
+        }
+        resetType = normalizeResetType(configuredResetType);
         resetDay = getConfig().getInt("resetDay", 1);
-        loadGameRulesFromConfig();
+        nextIntervalReset = parseNextIntervalReset(getConfig().getString("nextIntervalReset", null));
+        loadResourceWorldsFromConfig();
 
         LogUtil.log(getLogger(), "Configuration loaded: worldName=" + worldName +
                 ", multiverseEnabled=" + multiverseEnabled +
                 ", resetType=" + resetType + ", restartTime=" + restartTime +
                 ", resetWarningTime=" + resetWarningTime +
-                ", gameRules=" + configuredGameRules.size(), Level.INFO);
+                ", resetIntervalDays=" + resetIntervalDays +
+                ", enabledResourceWorlds=" + getEnabledResourceWorlds().size(), Level.INFO);
+    }
+
+    private void loadResourceWorldsFromConfig() {
+        resourceWorlds.clear();
+
+        Map<String, Object> legacyOverworldGameRules = loadGameRules("worldGameRules");
+        Map<String, Object> defaultGameRules = defaultWorldGameRules();
+        Map<String, Object> overworldFallbackGameRules = legacyOverworldGameRules.isEmpty()
+                ? defaultGameRules
+                : legacyOverworldGameRules;
+
+        ResourceWorldSettings overworld = loadResourceWorldSettings(
+                OVERWORLD_RESOURCE_KEY,
+                "Overworld Resource World",
+                getConfig().getString("worldName", "Resources"),
+                World.Environment.NORMAL,
+                true,
+                overworldFallbackGameRules
+        );
+        resourceWorlds.put(overworld.key, overworld);
+        worldName = overworld.name;
+
+        ResourceWorldSettings nether = loadResourceWorldSettings(
+                "nether",
+                "Nether Resource World",
+                "Resources_nether",
+                World.Environment.NETHER,
+                true,
+                defaultGameRules
+        );
+        resourceWorlds.put(nether.key, nether);
+
+        ResourceWorldSettings end = loadResourceWorldSettings(
+                "end",
+                "End Resource World",
+                "Resources_the_end",
+                World.Environment.THE_END,
+                true,
+                defaultGameRules
+        );
+        resourceWorlds.put(end.key, end);
+    }
+
+    private Map<String, Object> defaultWorldGameRules() {
+        Map<String, Object> defaultGameRules = new LinkedHashMap<>();
+        defaultGameRules.put("keep_inventory", true);
+        return defaultGameRules;
+    }
+
+    private ResourceWorldSettings loadResourceWorldSettings(String key, String displayName, String defaultName,
+                                                            World.Environment environment, boolean defaultEnabled,
+                                                            Map<String, Object> fallbackGameRules) {
+        String basePath = "resourceWorlds." + key;
+        boolean enabled = getConfig().getBoolean(basePath + ".enabled", defaultEnabled);
+        String name = getConfig().getString(basePath + ".name", defaultName);
+        Map<String, Object> gameRules = loadGameRules(basePath + ".gameRules");
+        if (gameRules.isEmpty()) {
+            gameRules.putAll(fallbackGameRules);
+        }
+        return new ResourceWorldSettings(key, displayName, enabled, name, environment, WorldType.NORMAL, gameRules);
+    }
+
+    private Map<String, Object> loadGameRules(String path) {
+        Map<String, Object> gameRules = new LinkedHashMap<>();
+        ConfigurationSection gameRuleSection = getConfig().getConfigurationSection(path);
+        if (gameRuleSection == null) {
+            return gameRules;
+        }
+
+        for (String key : gameRuleSection.getKeys(false)) {
+            gameRules.put(key, gameRuleSection.get(key));
+        }
+        return gameRules;
+    }
+
+    private List<ResourceWorldSettings> getEnabledResourceWorlds() {
+        List<ResourceWorldSettings> enabledWorlds = new ArrayList<>();
+        for (ResourceWorldSettings settings : resourceWorlds.values()) {
+            if (settings.enabled) {
+                enabledWorlds.add(settings);
+            }
+        }
+        return enabledWorlds;
+    }
+
+    private String normalizeResetType(String type) {
+        if (type == null) {
+            return "daily";
+        }
+
+        String normalized = type.trim().toLowerCase(Locale.ROOT).replace("-", "_").replace(" ", "_");
+        return switch (normalized) {
+            case "daily", "weekly", "monthly", "interval" -> normalized;
+            case "every_2_days", "2_days", "two_days" -> "interval";
+            case "every_3_days", "3_days", "three_days" -> "interval";
+            default -> "daily";
+        };
+    }
+
+    private Integer parseIntervalDaysFromResetType(String type) {
+        if (type == null) {
+            return null;
+        }
+
+        String normalized = type.trim().toLowerCase(Locale.ROOT).replace("-", "_").replace(" ", "_");
+        return switch (normalized) {
+            case "every_2_days", "2_days", "two_days" -> 2;
+            case "every_3_days", "3_days", "three_days" -> 3;
+            default -> null;
+        };
+    }
+
+    private LocalDateTime parseNextIntervalReset(String configuredValue) {
+        if (configuredValue == null || configuredValue.isBlank()) {
+            return null;
+        }
+
+        try {
+            return LocalDateTime.parse(configuredValue.trim()).withSecond(0).withNano(0);
+        } catch (DateTimeParseException ex) {
+            LogUtil.log(getLogger(), "Invalid nextIntervalReset value '" + configuredValue + "'. Recalculating interval reset schedule.", Level.WARNING);
+            return null;
+        }
+    }
+
+    private void clearNextIntervalReset() {
+        nextIntervalReset = null;
+        getConfig().set("nextIntervalReset", null);
+    }
+
+    private String capitalizeFirstLetter(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        return text.substring(0, 1).toUpperCase(Locale.ROOT) + text.substring(1).toLowerCase(Locale.ROOT);
     }
 
     private void setupMultiverseIntegration() {
@@ -425,44 +728,31 @@ public class ResourceWorldResetter extends JavaPlugin {
         LogUtil.log(getLogger(), "Multiverse integration enabled.", Level.INFO);
     }
 
-    private void loadGameRulesFromConfig() {
-        configuredGameRules.clear();
-
-        ConfigurationSection gameRuleSection = getConfig().getConfigurationSection("worldGameRules");
-        if (gameRuleSection == null) {
-            return;
-        }
-
-        for (String key : gameRuleSection.getKeys(false)) {
-            configuredGameRules.put(key, gameRuleSection.get(key));
-        }
-    }
-
-    private void applyConfiguredGameRulesWithRetry(World world) {
+    private void applyConfiguredGameRulesWithRetry(ResourceWorldSettings settings, World world) {
         if (world != null) {
-            applyConfiguredGameRules(world);
+            applyConfiguredGameRules(settings, world);
             return;
         }
 
         Bukkit.getScheduler().runTaskLater(this, () -> {
-            World delayedWorld = Bukkit.getWorld(worldName);
+            World delayedWorld = Bukkit.getWorld(settings.name);
             if (delayedWorld == null) {
-                LogUtil.log(getLogger(), "Could not find world '" + worldName + "' to apply configured gamerules.", Level.WARNING);
+                LogUtil.log(getLogger(), "Could not find world '" + settings.name + "' to apply configured gamerules.", Level.WARNING);
                 return;
             }
-            applyConfiguredGameRules(delayedWorld);
+            applyConfiguredGameRules(settings, delayedWorld);
         }, 20L);
     }
 
-    private void applyConfiguredGameRules(World world) {
-        if (configuredGameRules.isEmpty()) {
+    private void applyConfiguredGameRules(ResourceWorldSettings settings, World world) {
+        if (settings.gameRules.isEmpty()) {
             return;
         }
 
         int applied = 0;
         int failed = 0;
 
-        for (Map.Entry<String, Object> entry : configuredGameRules.entrySet()) {
+        for (Map.Entry<String, Object> entry : settings.gameRules.entrySet()) {
             String configuredName = entry.getKey();
             GameRule<?> gameRule = resolveGameRule(configuredName);
             if (gameRule == null) {
@@ -479,40 +769,40 @@ public class ResourceWorldResetter extends JavaPlugin {
         }
 
         LogUtil.log(getLogger(), "Applied gamerules for world '" + world.getName() + "': success=" + applied + ", failed=" + failed, Level.INFO);
-        applyMultiverseKeepInventoryIfConfigured(world);
+        applyMultiverseKeepInventoryIfConfigured(settings, world);
     }
 
-    private void ensureMultiverseWorldRegisteredWithRetry(World world) {
+    private void ensureMultiverseWorldRegisteredWithRetry(ResourceWorldSettings settings, World world) {
         if (!isMultiverseUsable()) {
             return;
         }
 
         if (world != null) {
-            ensureMultiverseWorldRegistered(world);
+            ensureMultiverseWorldRegistered(settings, world);
             return;
         }
 
-        Bukkit.getScheduler().runTaskLater(this, () -> ensureMultiverseWorldRegistered(Bukkit.getWorld(worldName)), 20L);
+        Bukkit.getScheduler().runTaskLater(this, () -> ensureMultiverseWorldRegistered(settings, Bukkit.getWorld(settings.name)), 20L);
     }
 
-    private void ensureMultiverseWorldRegistered(World world) {
+    private void ensureMultiverseWorldRegistered(ResourceWorldSettings settings, World world) {
         if (!isMultiverseUsable()) {
             return;
         }
 
-        String targetWorldName = world != null ? world.getName() : worldName;
+        String targetWorldName = world != null ? world.getName() : settings.name;
         if (targetWorldName == null || targetWorldName.isBlank()) {
             return;
         }
 
         if (isMultiverseWorldRegistered(targetWorldName)) {
-            applyMultiverseKeepInventoryIfConfigured(world);
+            applyMultiverseKeepInventoryIfConfigured(settings, world);
             return;
         }
 
-        boolean registered = addWorld(targetWorldName);
+        boolean registered = addWorld(settings);
         if (!registered) {
-            registered = importWorldWithMultiverseCommand(targetWorldName);
+            registered = importWorldWithMultiverseCommand(settings);
         }
         if (!registered) {
             registered = isMultiverseWorldRegistered(targetWorldName);
@@ -520,7 +810,7 @@ public class ResourceWorldResetter extends JavaPlugin {
 
         if (registered) {
             LogUtil.log(getLogger(), "Registered resource world '" + targetWorldName + "' with Multiverse.", Level.INFO);
-            applyMultiverseKeepInventoryIfConfigured(world);
+            applyMultiverseKeepInventoryIfConfigured(settings, world);
         } else {
             LogUtil.log(getLogger(), "Could not register resource world '" + targetWorldName + "' with Multiverse.", Level.WARNING);
         }
@@ -553,22 +843,23 @@ public class ResourceWorldResetter extends JavaPlugin {
         );
     }
 
-    private boolean importWorldWithMultiverseCommand(String targetWorldName) {
+    private boolean importWorldWithMultiverseCommand(ResourceWorldSettings settings) {
         if (!isMultiverseUsable()) {
             return false;
         }
 
+        String targetWorldName = settings.name;
         if (!targetWorldName.matches("[A-Za-z0-9_./-]+")) {
             LogUtil.log(getLogger(), "Skipping Multiverse command import for world name with unsupported command characters: " + targetWorldName, Level.WARNING);
             return false;
         }
 
-        boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mv import " + targetWorldName + " NORMAL");
+        boolean dispatched = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mv import " + targetWorldName + " " + getMultiverseEnvironmentName(settings));
         return dispatched && (mvWorldManager == null || isMultiverseWorldRegistered(targetWorldName));
     }
 
-    private void applyMultiverseKeepInventoryIfConfigured(World world) {
-        if (!isMultiverseUsable() || !isKeepInventoryConfiguredTrue()) {
+    private void applyMultiverseKeepInventoryIfConfigured(ResourceWorldSettings settings, World world) {
+        if (!isMultiverseUsable() || !isKeepInventoryConfiguredTrue(settings)) {
             return;
         }
 
@@ -579,7 +870,7 @@ public class ResourceWorldResetter extends JavaPlugin {
             }
         }
 
-        Object mvWorld = getMultiverseWorld(world != null ? world.getName() : worldName);
+        Object mvWorld = getMultiverseWorld(world != null ? world.getName() : settings.name);
         if (mvWorld == null) {
             return;
         }
@@ -589,7 +880,7 @@ public class ResourceWorldResetter extends JavaPlugin {
                 || setMultiverseWorldProperty(mvWorld, "keepinventory", "true");
 
         if (updated) {
-            LogUtil.log(getLogger(), "Applied Multiverse keep-inventory property for world '" + (world != null ? world.getName() : worldName) + "'.", Level.INFO);
+            LogUtil.log(getLogger(), "Applied Multiverse keep-inventory property for world '" + (world != null ? world.getName() : settings.name) + "'.", Level.INFO);
         }
     }
 
@@ -607,8 +898,8 @@ public class ResourceWorldResetter extends JavaPlugin {
         }
     }
 
-    private boolean isKeepInventoryConfiguredTrue() {
-        for (Map.Entry<String, Object> entry : configuredGameRules.entrySet()) {
+    private boolean isKeepInventoryConfiguredTrue(ResourceWorldSettings settings) {
+        for (Map.Entry<String, Object> entry : settings.gameRules.entrySet()) {
             if ("keepinventory".equals(normalizeGameRuleName(entry.getKey()))) {
                 return Boolean.TRUE.equals(parseBoolean(entry.getValue()));
             }
@@ -741,13 +1032,13 @@ public class ResourceWorldResetter extends JavaPlugin {
         return manager;
     }
 
-    private boolean unloadWorld(World world) {
+    private boolean unloadWorld(ResourceWorldSettings settings, World world) {
         if (!isMultiverseUsable()) {
             return Bukkit.unloadWorld(world, true);
         }
 
         Boolean unloaded = firstNonNull(
-                invokeBooleanMethod(mvWorldManager, "unloadWorld", worldName),
+                invokeBooleanMethod(mvWorldManager, "unloadWorld", settings.name),
                 invokeBooleanMethod(mvWorldManager, "unloadWorld", world)
         );
 
@@ -758,14 +1049,14 @@ public class ResourceWorldResetter extends JavaPlugin {
         return Bukkit.unloadWorld(world, true);
     }
 
-    private boolean forceUnloadWorld(World world) {
+    private boolean forceUnloadWorld(ResourceWorldSettings settings, World world) {
         if (!isMultiverseUsable()) {
             return Bukkit.unloadWorld(world, true);
         }
 
         Boolean unloaded = firstNonNull(
-                invokeBooleanMethod(mvWorldManager, "unloadWorld", worldName, true),
-                invokeBooleanMethod(mvWorldManager, "unloadWorld", worldName, false),
+                invokeBooleanMethod(mvWorldManager, "unloadWorld", settings.name, true),
+                invokeBooleanMethod(mvWorldManager, "unloadWorld", settings.name, false),
                 invokeBooleanMethod(mvWorldManager, "unloadWorld", world, true)
         );
 
@@ -776,19 +1067,26 @@ public class ResourceWorldResetter extends JavaPlugin {
         return Bukkit.unloadWorld(world, true);
     }
 
-    private boolean addWorld(String targetWorldName) {
+    private boolean addWorld(ResourceWorldSettings settings) {
         if (!isMultiverseUsable() || mvWorldManager == null) {
             return false;
         }
 
         Boolean added = firstNonNull(
-                invokeBooleanMethod(mvWorldManager, "addWorld", targetWorldName, World.Environment.NORMAL, null, WorldType.NORMAL, true, "DEFAULT"),
-                invokeBooleanMethod(mvWorldManager, "addWorld", targetWorldName, "NORMAL", null, "NORMAL", true, "DEFAULT"),
-                invokeBooleanMethod(mvWorldManager, "addWorld", targetWorldName, World.Environment.NORMAL, null, WorldType.NORMAL, true),
-                invokeBooleanMethod(mvWorldManager, "addWorld", targetWorldName, "NORMAL", null, "NORMAL", true)
+                invokeBooleanMethod(mvWorldManager, "addWorld", settings.name, settings.environment, null, settings.worldType, true, "DEFAULT"),
+                invokeBooleanMethod(mvWorldManager, "addWorld", settings.name, getMultiverseEnvironmentName(settings), null, settings.worldType.name(), true, "DEFAULT"),
+                invokeBooleanMethod(mvWorldManager, "addWorld", settings.name, settings.environment, null, settings.worldType, true),
+                invokeBooleanMethod(mvWorldManager, "addWorld", settings.name, getMultiverseEnvironmentName(settings), null, settings.worldType.name(), true)
         );
 
         return Boolean.TRUE.equals(added);
+    }
+
+    private String getMultiverseEnvironmentName(ResourceWorldSettings settings) {
+        if (settings.environment == World.Environment.THE_END) {
+            return "END";
+        }
+        return settings.environment.name();
     }
 
     private boolean isMultiverseUsable() {
@@ -905,6 +1203,28 @@ public class ResourceWorldResetter extends JavaPlugin {
             return Character.class;
         }
         return type;
+    }
+
+    private static final class ResourceWorldSettings {
+        private final String key;
+        private final String displayName;
+        private final boolean enabled;
+        private String name;
+        private final World.Environment environment;
+        private final WorldType worldType;
+        private final Map<String, Object> gameRules;
+
+        private ResourceWorldSettings(String key, String displayName, boolean enabled, String name,
+                                      World.Environment environment, WorldType worldType,
+                                      Map<String, Object> gameRules) {
+            this.key = key;
+            this.displayName = displayName;
+            this.enabled = enabled;
+            this.name = name;
+            this.environment = environment;
+            this.worldType = worldType;
+            this.gameRules = gameRules;
+        }
     }
 
     @SafeVarargs

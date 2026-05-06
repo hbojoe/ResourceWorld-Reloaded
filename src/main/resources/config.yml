@@ -1,4 +1,3 @@
-worldName: "Resources"    # Default world name set to "Resources"
 resetWarningTime: 5       # Time (in minutes) to warn players before reset
 restartTime: 3            # Hour of day when reset happens (24-hour format)
 
@@ -7,14 +6,39 @@ multiverse:
   # Bukkit gamerules are still applied directly so keep_inventory works even without Multiverse.
   enabled: true
 
-# Reset type: "daily", "weekly", or "monthly"
+# Reset type: "daily", "interval", "weekly", or "monthly"
 resetType: "daily"
+# For interval: number of days between resets (2=every other day, 3=every 3 days)
+resetIntervalDays: 1
+# Internal persisted date/time for interval resets. Leave blank to calculate from the next restartTime.
+nextIntervalReset:
 # For weekly: day of week (1=Monday through 7=Sunday)
 # For monthly: day of month (1-31)
 resetDay: 1
 
-# Gamerules applied whenever the resource world is created/recreated.
-# Names are flexible: keepInventory, keep_inventory, KEEP_INVENTORY all work.
-# Supported value types on 1.21.11 are boolean and integer.
-worldGameRules:
-  keep_inventory: true
+# Resource worlds reset together using the global schedule above.
+# Disable any resource world by setting enabled: false.
+resourceWorlds:
+  overworld:
+    enabled: true
+    name: "Resources"
+    # Gamerules applied whenever this world is created/recreated.
+    # Names are flexible: keepInventory, keep_inventory, KEEP_INVENTORY all work.
+    # Supported value types on 1.21.11 are boolean and integer.
+    gameRules:
+      keep_inventory: true
+
+  nether:
+    enabled: true
+    name: "Resources_nether"
+    gameRules:
+      keep_inventory: true
+
+  end:
+    enabled: true
+    name: "Resources_the_end"
+    gameRules:
+      keep_inventory: true
+
+# Legacy fallback for older configs. Prefer resourceWorlds.overworld.name.
+worldName: "Resources"

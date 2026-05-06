@@ -73,15 +73,15 @@ public class AdminGUIListener implements Listener {
             worldName = worldName.substring(0, worldName.indexOf(" (Current)"));
         }
 
-        // Update the world name in plugin config
+        // Update the overworld resource world name in plugin config
         plugin.setWorldName(worldName);
-        player.sendMessage(ChatColor.GREEN + "Resource world set to: " + worldName);
+        player.sendMessage(ChatColor.GREEN + "Overworld resource world set to: " + worldName);
         adminGUI.openMainMenu(player);
     }
 
     private void handleMainMenuClick(Player player, String itemName) {
         switch (itemName) {
-            case "Change World":
+            case "Change Overworld":
                 adminGUI.openWorldSelectionMenu(player);
                 break;
             case "Reset Type":
@@ -96,7 +96,7 @@ public class AdminGUIListener implements Listener {
             case "Force Reset":
                 player.closeInventory();
                 plugin.resetResourceWorld();
-                player.sendMessage(ChatColor.GREEN + "World reset initiated!");
+                player.sendMessage(ChatColor.GREEN + "Global resource world reset initiated!");
                 break;
             case "Reload Config":
                 player.closeInventory();
@@ -152,6 +152,16 @@ public class AdminGUIListener implements Listener {
             case "Daily Reset":
                 plugin.setResetType("daily");
                 player.sendMessage(ChatColor.GREEN + "Reset type set to daily!");
+                adminGUI.openMainMenu(player);
+                break;
+            case "Every 2 Days":
+                plugin.setIntervalResetDays(2);
+                player.sendMessage(ChatColor.GREEN + "Reset type set to every 2 days!");
+                adminGUI.openMainMenu(player);
+                break;
+            case "Every 3 Days":
+                plugin.setIntervalResetDays(3);
+                player.sendMessage(ChatColor.GREEN + "Reset type set to every 3 days!");
                 adminGUI.openMainMenu(player);
                 break;
             case "Weekly Reset":

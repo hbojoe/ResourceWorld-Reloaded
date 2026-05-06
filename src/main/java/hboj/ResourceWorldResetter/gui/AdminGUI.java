@@ -45,15 +45,15 @@ public class AdminGUI implements Listener {
 
         // Current settings display with colors
         gui.setItem(4, createInfoItem(Material.BOOK, "Current Settings",
-                "World: " + ChatColor.AQUA + plugin.getWorldName(),
-                "Reset Type: " + ChatColor.YELLOW + capitalizeFirstLetter(plugin.getResetType()),
+                "Worlds: " + ChatColor.AQUA + plugin.getEnabledResourceWorldSummary(),
+                "Reset Type: " + ChatColor.YELLOW + plugin.getResetScheduleDescription(),
                 "Restart Time: " + ChatColor.GOLD + plugin.getRestartTime() + ":00",
                 "Warning Time: " + ChatColor.RED + plugin.getResetWarningTime() + " minutes"));
 
         // Main options with improved icons and descriptions
-        gui.setItem(10, createGuiItem(Material.GRASS_BLOCK, "Change World", "Select which world to reset"));
-        gui.setItem(12, createGuiItem(Material.CLOCK, "Reset Type", "Daily, weekly, or monthly"));
-        gui.setItem(14, createGuiItem(Material.SUNFLOWER, "Restart Time", "Hour of daily reset"));
+        gui.setItem(10, createGuiItem(Material.GRASS_BLOCK, "Change Overworld", "Select the overworld resource world"));
+        gui.setItem(12, createGuiItem(Material.CLOCK, "Reset Type", "Daily, every 2/3 days, weekly, or monthly"));
+        gui.setItem(14, createGuiItem(Material.SUNFLOWER, "Restart Time", "Hour when reset runs"));
         gui.setItem(16, createGuiItem(Material.BELL, "Warning Time", "Minutes before reset"));
 
         gui.setItem(20, createGuiItem(Material.TNT, "Force Reset", "Reset world immediately"));
@@ -65,7 +65,7 @@ public class AdminGUI implements Listener {
 
     // World selection menu
     public void openWorldSelectionMenu(Player player) {
-        Inventory gui = Bukkit.createInventory(player, 54, ChatColor.DARK_AQUA + "Select Resource World");
+        Inventory gui = Bukkit.createInventory(player, 54, ChatColor.DARK_AQUA + "Select Overworld Resource");
 
         int slot = 0;
 
@@ -106,14 +106,6 @@ public class AdminGUI implements Listener {
         activeGuis.put(player.getUniqueId(), GuiType.WORLD_SELECTION_MENU);
     }
 
-    // Helper method to capitalize first letter
-    private String capitalizeFirstLetter(String text) {
-        if (text == null || text.isEmpty()) {
-            return text;
-        }
-        return text.substring(0, 1).toUpperCase() + text.substring(1).toLowerCase();
-    }
-
     private ItemStack createGuiItem(Material material, String name, String... lore) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
@@ -139,13 +131,15 @@ public class AdminGUI implements Listener {
     }
 
     public void openResetTypeMenu(Player player) {
-        Inventory gui = Bukkit.createInventory(player, 9, ChatColor.DARK_AQUA + "Select Reset Type");
+        Inventory gui = Bukkit.createInventory(player, 18, ChatColor.DARK_AQUA + "Select Reset Type");
 
-        gui.setItem(2, createGuiItem(Material.PAPER, "Daily Reset", "Reset every day"));
-        gui.setItem(4, createGuiItem(Material.BOOK, "Weekly Reset", "Reset on a specific day of the week"));
-        gui.setItem(6, createGuiItem(Material.CLOCK, "Monthly Reset", "Reset on a specific day of the month"));
+        gui.setItem(1, createGuiItem(Material.PAPER, "Daily Reset", "Reset every day"));
+        gui.setItem(3, createGuiItem(Material.CLOCK, "Every 2 Days", "Reset every 2 days"));
+        gui.setItem(5, createGuiItem(Material.CLOCK, "Every 3 Days", "Reset every 3 days"));
+        gui.setItem(7, createGuiItem(Material.BOOK, "Weekly Reset", "Reset on a specific day of the week"));
+        gui.setItem(13, createGuiItem(Material.CLOCK, "Monthly Reset", "Reset on a specific day of the month"));
 
-        gui.setItem(8, createGuiItem(Material.BARRIER, "Back", "Return to main menu"));
+        gui.setItem(17, createGuiItem(Material.BARRIER, "Back", "Return to main menu"));
 
         player.openInventory(gui);
         activeGuis.put(player.getUniqueId(), GuiType.RESET_TYPE_MENU);
