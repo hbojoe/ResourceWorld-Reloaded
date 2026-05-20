@@ -27,12 +27,19 @@ resourceWorlds:
     # Supported value types on 1.21.11 are boolean and integer.
     gameRules:
       keep_inventory: true
+    # When enabled, applies a worldborder centered at X/Z 0 with this size.
+    worldBorder:
+      enabled: true
+      size: 2000
 
   nether:
     enabled: true
     name: "Resources_nether"
     gameRules:
       keep_inventory: true
+    worldBorder:
+      enabled: true
+      size: 2000
 
   end:
     enabled: true
@@ -41,6 +48,9 @@ resourceWorlds:
     disableDragonSpawn: false
     gameRules:
       keep_inventory: true
+    worldBorder:
+      enabled: true
+      size: 2000
 
 # Legacy fallback for older configs. Prefer resourceWorlds.overworld.name.
 worldName: "Resources"

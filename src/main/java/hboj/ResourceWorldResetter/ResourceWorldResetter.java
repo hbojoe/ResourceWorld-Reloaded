@@ -10,6 +10,7 @@ import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.Registry;
 import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.WorldCreator;
 import org.bukkit.WorldType;
 import org.bukkit.command.Command;
@@ -42,6 +43,9 @@ import java.util.logging.Level;
 
 public class ResourceWorldResetter extends JavaPlugin implements Listener {
     private static final String OVERWORLD_RESOURCE_KEY = "overworld";
+    private static final double DEFAULT_WORLD_BORDER_SIZE = 59_999_968.0D;
+    private static final double MIN_WORLD_BORDER_SIZE = 1.0D;
+    private static final double MAX_WORLD_BORDER_SIZE = 59_999_968.0D;
 
     private String worldName;
     private boolean multiverseEnabled;
@@ -510,6 +514,7 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
 
         if (success) {
             applyConfiguredGameRulesWithRetry(settings, recreatedWorld);
+            applyConfiguredWorldBorderWithRetry(settings, recreatedWorld);
             removeEnderDragonsIfDisabled(settings, recreatedWorld);
             ensureMultiverseWorldRegisteredWithRetry(settings, recreatedWorld);
             Bukkit.broadcastMessage(ChatColor.GREEN + "[ResourceWorldResetter] " +
@@ -552,6 +557,7 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
             }
             if (success) {
                 applyConfiguredGameRulesWithRetry(settings, createdWorld);
+                applyConfiguredWorldBorderWithRetry(settings, createdWorld);
                 removeEnderDragonsIfDisabled(settings, createdWorld);
                 ensureMultiverseWorldRegisteredWithRetry(settings, createdWorld);
             }
@@ -560,6 +566,7 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
             LogUtil.log(getLogger(), "Resource world exists: " + settings.name, Level.INFO);
             World world = Bukkit.getWorld(settings.name);
             applyConfiguredGameRulesWithRetry(settings, world);
+            applyConfiguredWorldBorderWithRetry(settings, world);
             removeEnderDragonsIfDisabled(settings, world);
             ensureMultiverseWorldRegisteredWithRetry(settings, world);
         }
@@ -644,11 +651,34 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
         String name = getConfig().getString(basePath + ".name", defaultName);
         boolean disableDragonSpawn = World.Environment.THE_END.equals(environment)
                 && getConfig().getBoolean(basePath + ".disableDragonSpawn", false);
+        String worldBorderPath = basePath + ".worldBorder";
+        boolean worldBorderConfigured = getConfig().isSet(worldBorderPath);
+        boolean worldBorderEnabled = getConfig().getBoolean(worldBorderPath + ".enabled", false);
+        double worldBorderSize = loadWorldBorderSize(worldBorderPath + ".size", DEFAULT_WORLD_BORDER_SIZE);
         Map<String, Object> gameRules = loadGameRules(basePath + ".gameRules");
         if (gameRules.isEmpty()) {
             gameRules.putAll(fallbackGameRules);
         }
-        return new ResourceWorldSettings(key, displayName, enabled, name, environment, WorldType.NORMAL, gameRules, disableDragonSpawn);
+        return new ResourceWorldSettings(key, displayName, enabled, name, environment, WorldType.NORMAL, gameRules,
+                disableDragonSpawn, worldBorderConfigured, worldBorderEnabled, worldBorderSize);
+    }
+
+    private double loadWorldBorderSize(String path, double defaultSize) {
+        Object configuredValue = getConfig().get(path, defaultSize);
+        Double parsedSize = parseDouble(configuredValue);
+        if (parsedSize == null) {
+            LogUtil.log(getLogger(), "Invalid worldborder size '" + configuredValue + "' at '" + path + "'. Using " + defaultSize + ".", Level.WARNING);
+            return defaultSize;
+        }
+        if (parsedSize < MIN_WORLD_BORDER_SIZE) {
+            LogUtil.log(getLogger(), "Worldborder size '" + configuredValue + "' at '" + path + "' is below the minimum. Using " + MIN_WORLD_BORDER_SIZE + ".", Level.WARNING);
+            return MIN_WORLD_BORDER_SIZE;
+        }
+        if (parsedSize > MAX_WORLD_BORDER_SIZE) {
+            LogUtil.log(getLogger(), "Worldborder size '" + configuredValue + "' at '" + path + "' is above the maximum. Using " + MAX_WORLD_BORDER_SIZE + ".", Level.WARNING);
+            return MAX_WORLD_BORDER_SIZE;
+        }
+        return parsedSize;
     }
 
     private Map<String, Object> loadGameRules(String path) {
@@ -793,6 +823,40 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
             }
             applyConfiguredGameRules(settings, delayedWorld);
         }, 20L);
+    }
+
+    private void applyConfiguredWorldBorderWithRetry(ResourceWorldSettings settings, World world) {
+        if (!settings.worldBorderConfigured) {
+            return;
+        }
+
+        if (world != null) {
+            applyConfiguredWorldBorder(settings, world);
+            return;
+        }
+
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            World delayedWorld = Bukkit.getWorld(settings.name);
+            if (delayedWorld == null) {
+                LogUtil.log(getLogger(), "Could not find world '" + settings.name + "' to apply configured worldborder.", Level.WARNING);
+                return;
+            }
+            applyConfiguredWorldBorder(settings, delayedWorld);
+        }, 20L);
+    }
+
+    private void applyConfiguredWorldBorder(ResourceWorldSettings settings, World world) {
+        WorldBorder worldBorder = world.getWorldBorder();
+        worldBorder.setCenter(0.0D, 0.0D);
+
+        double size = settings.worldBorderEnabled ? settings.worldBorderSize : DEFAULT_WORLD_BORDER_SIZE;
+        try {
+            worldBorder.setSize(size);
+            String state = settings.worldBorderEnabled ? "enabled" : "disabled";
+            LogUtil.log(getLogger(), "Configured worldborder for world '" + world.getName() + "': " + state + ", size=" + size, Level.INFO);
+        } catch (IllegalArgumentException ex) {
+            LogUtil.log(getLogger(), "Failed to apply worldborder for world '" + world.getName() + "': " + ex.getMessage(), Level.WARNING);
+        }
     }
 
     private void applyConfiguredGameRules(ResourceWorldSettings settings, World world) {
@@ -1073,6 +1137,20 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
         return null;
     }
 
+    private Double parseDouble(Object value) {
+        if (value instanceof Number numberValue) {
+            return numberValue.doubleValue();
+        }
+        if (value instanceof String stringValue) {
+            try {
+                return Double.parseDouble(stringValue.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
     public Set<String> getAvailableWorldNames() {
         LinkedHashSet<String> worldNames = new LinkedHashSet<>();
 
@@ -1303,10 +1381,14 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
         private final WorldType worldType;
         private final Map<String, Object> gameRules;
         private final boolean disableDragonSpawn;
+        private final boolean worldBorderConfigured;
+        private final boolean worldBorderEnabled;
+        private final double worldBorderSize;
 
         private ResourceWorldSettings(String key, String displayName, boolean enabled, String name,
                                       World.Environment environment, WorldType worldType,
-                                      Map<String, Object> gameRules, boolean disableDragonSpawn) {
+                                      Map<String, Object> gameRules, boolean disableDragonSpawn,
+                                      boolean worldBorderConfigured, boolean worldBorderEnabled, double worldBorderSize) {
             this.key = key;
             this.displayName = displayName;
             this.enabled = enabled;
@@ -1315,6 +1397,9 @@ public class ResourceWorldResetter extends JavaPlugin implements Listener {
             this.worldType = worldType;
             this.gameRules = gameRules;
             this.disableDragonSpawn = disableDragonSpawn;
+            this.worldBorderConfigured = worldBorderConfigured;
+            this.worldBorderEnabled = worldBorderEnabled;
+            this.worldBorderSize = worldBorderSize;
         }
 
         private boolean shouldDisableDragonSpawnIn(World world) {

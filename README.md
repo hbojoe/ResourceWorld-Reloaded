@@ -10,7 +10,7 @@ ResourceWorldResetter automates the resetting of resource worlds on your Minecra
 - **Multiverse-Core** support
 - Safe teleportation before resets
 - Configurable reset warnings
-- Per-resource-world enable toggles and gamerules on create/reset (e.g. `keep_inventory: true`)
+- Per-resource-world enable toggles, gamerules, and optional worldborders on create/reset
 - **bStats integration** for analytics
 - Supports **Minecraft/Paper 1.21.11+**
 
@@ -38,12 +38,18 @@ resourceWorlds:
     name: "Resources"
     gameRules:
       keep_inventory: true
+    worldBorder:
+      enabled: false
+      size: 10000
 
   nether:
     enabled: true
     name: "Resources_nether"
     gameRules:
       keep_inventory: true
+    worldBorder:
+      enabled: false
+      size: 10000
 
   end:
     enabled: true
@@ -51,6 +57,9 @@ resourceWorlds:
     disableDragonSpawn: false
     gameRules:
       keep_inventory: true
+    worldBorder:
+      enabled: false
+      size: 10000
 ```
 
 ## More Information
